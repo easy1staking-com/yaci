@@ -16,6 +16,7 @@ import com.bloxbean.cardano.yaci.core.storage.ChainTip;
 import com.bloxbean.cardano.yaci.core.util.CborSerializationUtil;
 import com.bloxbean.cardano.yaci.core.util.HexUtil;
 import io.netty.channel.*;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
@@ -950,11 +951,13 @@ class ChainSyncServerAgentConcurrencyTest {
     // ---- Stub Channel that simulates immediate successful writes ----
 
     static class StubChannel implements Channel {
+        // Agent writes on the channel's event loop; an embedded loop counts every thread as the loop
+        private static final EventLoop EVENT_LOOP = new EmbeddedChannel().eventLoop();
         private final StubChannelFuture successFuture = new StubChannelFuture();
         private final List<Object> written = new CopyOnWriteArrayList<>();
         private final List<Thread> writerThreads = new CopyOnWriteArrayList<>();
         private volatile ChannelFuture writeFuture = successFuture;
-        private volatile EventLoop eventLoop;
+        private volatile EventLoop eventLoop = EVENT_LOOP;
         private volatile boolean closed;
 
         void useEventLoop(EventLoop eventLoop) {
