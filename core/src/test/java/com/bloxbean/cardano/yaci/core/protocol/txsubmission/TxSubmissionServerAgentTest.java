@@ -5,6 +5,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.AfterEach;
 
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -333,7 +334,7 @@ class TxSubmissionServerAgentTest {
     }
 
     @Test
-    void testMsgDoneFromTxIdsBlockingTransitionsToDone() {
+    void testMsgDoneFromTxIdsBlockingLeavesTxIdsBlocking() {
         // Move to Idle, then have the server send a blocking RequestTxIds so we land in TxIdsBlocking
         agent.receiveResponse(new Init());
         assertEquals(TxSubmissionState.Idle, agent.getCurrentState());
@@ -343,11 +344,11 @@ class TxSubmissionServerAgentTest {
         assertFalse(agent.isDone());
 
         // Client terminates the protocol with MsgDone while we are blocking-waiting.
-        // Before the fix the agent stayed wedged in TxIdsBlocking forever; now it must reach Done.
+        // Before the fix the agent stayed wedged in TxIdsBlocking forever. It reached Done until the server
+        // learned to restart the protocol on the same connection (upstream 2ac8f61); it is now back in Init.
         agent.receiveResponse(new MsgDone());
 
-        assertEquals(TxSubmissionState.Done, agent.getCurrentState());
-        assertTrue(agent.isDone());
+        assertEquals(TxSubmissionState.Init, agent.getCurrentState());
         assertEquals(0, agent.getOutstandingTxCount());
     }
 
@@ -357,6 +358,95 @@ class TxSubmissionServerAgentTest {
         assertEquals(TxSubmissionState.Done, TxSubmissionState.TxIdsBlocking.nextState(new MsgDone()));
         assertEquals(TxSubmissionState.Done, TxSubmissionState.TxIdsNonBlocking.nextState(new MsgDone()));
         assertEquals(TxSubmissionState.Done, TxSubmissionState.Txs.nextState(new MsgDone()));
+    }
+
+    @Test
+    void testAllAnnouncedIdsAlreadySeen_sendsNextRequestAcknowledgingThem() {
+        agent.receiveResponse(new Init());
+        agent.buildNextMessage();
+        agent.receiveResponse(replyTxIds("tx1", "tx2"));
+        agent.buildNextMessage();
+        agent.receiveResponse(replyTxs(2));
+        assertEquals(2, assertInstanceOf(RequestTxIds.class, agent.buildNextMessage()).getAckTxIds());
+
+        agent.receiveResponse(replyTxIds("tx1", "tx2"));
+
+        // Without the next request the server, which has agency, would stall the protocol
+        RequestTxIds next = assertInstanceOf(RequestTxIds.class, agent.buildNextMessage());
+        assertTrue(next.isBlocking());
+        assertEquals(2, next.getAckTxIds());
+    }
+
+    @Test
+    void testAlreadySeenIdIsAcknowledgedNotRequestedAgain() {
+        agent.receiveResponse(new Init());
+        agent.buildNextMessage();
+        agent.receiveResponse(replyTxIds("tx1"));
+        agent.buildNextMessage();
+        agent.receiveResponse(replyTxs(1));
+        assertEquals(1, assertInstanceOf(RequestTxIds.class, agent.buildNextMessage()).getAckTxIds());
+
+        agent.receiveResponse(replyTxIds("tx1", "tx2"));
+        RequestTxs requestTxs = assertInstanceOf(RequestTxs.class, agent.buildNextMessage());
+        assertEquals(List.of(txId("tx2")), requestTxs.getTxIds());
+
+        agent.receiveResponse(replyTxs(1));
+        assertEquals(2, assertInstanceOf(RequestTxIds.class, agent.buildNextMessage()).getAckTxIds());
+    }
+
+    @Test
+    void testReplyWithFewerTxsThanRequested_acknowledgesAllAndContinues() {
+        agent.receiveResponse(new Init());
+        agent.buildNextMessage();
+        agent.receiveResponse(replyTxIds("tx1", "tx2", "tx3"));
+        assertInstanceOf(RequestTxs.class, agent.buildNextMessage());
+
+        // The client leaves out transactions it no longer has
+        agent.receiveResponse(replyTxs(1));
+
+        assertEquals(0, agent.getOutstandingTxCount());
+        RequestTxIds next = assertInstanceOf(RequestTxIds.class, agent.buildNextMessage());
+        assertTrue(next.isBlocking());
+        assertEquals(3, next.getAckTxIds());
+    }
+
+    @Test
+    void testMsgDone_letsTheClientStartTheProtocolAgainOnTheSameConnection() {
+        agent.receiveResponse(new Init());
+        agent.sendRequest(agent.buildNextMessage());
+        assertEquals(TxSubmissionState.TxIdsBlocking, agent.getCurrentState());
+
+        // The client ends the protocol in reply to the blocking request, as a Haskell node does when it demotes the
+        // peer from hot to warm
+        agent.receiveResponse(new MsgDone());
+        assertFalse(agent.isDone());
+        assertEquals(TxSubmissionState.Init, agent.getCurrentState());
+
+        // Promoted back to hot: Init starts a new request loop
+        agent.receiveResponse(new Init());
+        RequestTxIds request = assertInstanceOf(RequestTxIds.class, agent.buildNextMessage());
+        assertTrue(request.isBlocking());
+        assertEquals(0, request.getAckTxIds());
+    }
+
+    private static TxId txId(String id) {
+        return new TxId(com.bloxbean.cardano.yaci.core.protocol.localstate.api.Era.Conway, id.getBytes());
+    }
+
+    private static ReplyTxIds replyTxIds(String... ids) {
+        ReplyTxIds reply = new ReplyTxIds();
+        for (String id : ids) {
+            reply.addTxId(txId(id), 100);
+        }
+        return reply;
+    }
+
+    private static ReplyTxs replyTxs(int count) {
+        ReplyTxs reply = new ReplyTxs();
+        for (int i = 0; i < count; i++) {
+            reply.addTx(new Tx(com.bloxbean.cardano.yaci.core.protocol.localstate.api.Era.Conway, new byte[]{(byte) i}));
+        }
+        return reply;
     }
 
     @Test

@@ -122,15 +122,14 @@ public class TxSubmissionServerAgent extends Agent<TxSubmissionListener> {
     }
 
     /**
-     * The client terminated the tx-submission protocol with MsgDone. The state machine has already
-     * advanced to {@link TxSubmissionState#Done} (see {@link TxSubmissionState}), so the inbound
-     * handler stops routing to this agent and the session can be torn down; a fresh agent is created
-     * when the peer reconnects. Drop any in-flight bookkeeping so nothing leaks.
+     * The client ended the protocol, in reply to a blocking request. A Haskell node does so when it demotes the
+     * peer from hot to warm, and starts it again on the same connection, with Init, when it promotes the peer back;
+     * back to the initial state so that Init starts a new request loop. (TxSubmissionState has already moved the
+     * agent to Done; the reset leaves it in Init, so the inbound handler keeps routing to it.)
      */
     private void handleDone() {
-        log.info("Received MsgDone from client - tx-submission protocol terminated, agent is Done");
-        outstandingTxIds.clear();
-        pendingRequest = null;
+        log.info("TxSubmission client sent MsgDone; ready for the protocol to restart on this connection");
+        reset();
     }
 
     private void handleInit() {
@@ -149,46 +148,49 @@ public class TxSubmissionServerAgent extends Agent<TxSubmissionListener> {
             return;
         }
 
-        // Add transaction IDs to FIFO queue
+        // Add transaction IDs to FIFO queue. Every announced ID must be acknowledged; one that is not requested is
+        // done with now.
         replyTxIds.getTxIdAndSizeMap().forEach((txId, size) -> {
             String txIdStr = txId.toString();
-            if (!seenTxIds.contains(txIdStr)) {
-                outstandingTxIds.offer(txId);
-                seenTxIds.add(txIdStr);
-                log.debug("Added tx ID to queue: {} (size: {} bytes)", txId, size);
+            if (seenTxIds.contains(txIdStr)) {
+                pendingAcknowledgments.incrementAndGet();
+                return;
             }
+            outstandingTxIds.offer(txId);
+            seenTxIds.add(txIdStr);
+            log.debug("Added tx ID to queue: {} (size: {} bytes)", txId, size);
         });
 
         // Notify listeners
         getAgentListeners().forEach(listener -> listener.handleReplyTxIds(replyTxIds));
 
-        // Request the actual transaction bodies
+        // Request the actual transaction bodies, or the next IDs when none is wanted: the server has agency, so the
+        // protocol stalls unless it sends one or the other
         if (!outstandingTxIds.isEmpty()) {
             requestTransactionBodies();
+        } else {
+            log.debug("No announced transaction requested, sending next blocking request");
+            sendNextBlockingRequest();
         }
     }
 
     private void handleReplyTxs(ReplyTxs replyTxs) {
         log.info("Received ReplyTxs with {} transactions", replyTxs.getTxns().size());
 
-        // Process each transaction
-        for (Tx tx : replyTxs.getTxns()) {
-            // Remove from FIFO queue
-            TxId processedTxId = outstandingTxIds.poll();
-            if (processedTxId != null) {
-                pendingAcknowledgments.incrementAndGet();
-                log.debug("Processed transaction from queue, pending acks: {}", pendingAcknowledgments.get());
-            }
+        // The reply completes the request: every requested ID is done with, including any whose transaction the
+        // client no longer has and so left out of the reply
+        int requested = outstandingTxIds.size();
+        outstandingTxIds.clear();
+        pendingAcknowledgments.addAndGet(requested);
+        if (replyTxs.getTxns().size() < requested) {
+            log.debug("Client returned {} of {} requested transactions", replyTxs.getTxns().size(), requested);
         }
 
         // Notify listeners to process transactions
         getAgentListeners().forEach(listener -> listener.handleReplyTxs(replyTxs));
 
-        // Check if we need to request more transactions
-        if (outstandingTxIds.isEmpty()) {
-            log.info("All transactions processed, sending next blocking request");
-            sendNextBlockingRequest();
-        }
+        log.info("All transactions processed, sending next blocking request");
+        sendNextBlockingRequest();
     }
 
     private void sendInitialBlockingRequest() {
