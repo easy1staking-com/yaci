@@ -34,9 +34,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Concurrency tests for ChainSyncServerAgent to verify:
@@ -866,20 +863,38 @@ class ChainSyncServerAgentConcurrencyTest {
         final Point previous = new Point(4319, "00".repeat(32));
         final Point ebb = new Point(4320, "01".repeat(32));
         final Point main = new Point(4320, "02".repeat(32));
-        final ChainState state = mock(ChainState.class);
+        // Written out rather than mocked: this tree's Mockito (3.7.7) cannot instrument Java 21 classes. Methods the
+        // test does not set up answer as a Mockito mock would.
+        final ChainState state = new ChainState() {
+            @Override public ChainTip getTip() { return tip; }
+            @Override public boolean hasPoint(Point point) { return true; }
+            @Override public Point findNextBlock(Point currentPoint) {
+                return previous.equals(currentPoint) ? ebb : ebb.equals(currentPoint) ? main : null;
+            }
+            @Override public byte[] getBlockHeader(byte[] blockHash) {
+                String hash = HexUtil.encodeHexString(blockHash);
+                byte blockNumber = (byte) (hash.equals(ebb.getHash()) ? 1 : 2);
+                return new byte[]{(byte) 0x82, 0x07, 0x43, blockNumber, 0, 0};
+            }
+            @Override public void storeBlock(byte[] blockHash, Long blockNumber, Long slot, byte[] block) {}
+            @Override public byte[] getBlock(byte[] blockHash) { return null; }
+            @Override public boolean hasBlock(byte[] blockHash) { return false; }
+            @Override public void storeBlockHeader(byte[] blockHash, Long blockNumber, Long slot, byte[] blockHeader) {}
+            @Override public byte[] getBlockByNumber(Long blockNumber) { return null; }
+            @Override public byte[] getBlockHeaderByNumber(Long blockNumber) { return null; }
+            @Override public Point findNextBlockHeader(Point currentPoint) { return null; }
+            @Override public List<Point> findBlocksInRange(Point from, Point to) { return List.of(); }
+            @Override public Point findLastPointAfterNBlocks(Point from, long batchSize) { return null; }
+            @Override public Point getFirstBlock() { return null; }
+            @Override public Long getBlockNumberBySlot(Long slot) { return 0L; }
+            @Override public Long getSlotByBlockNumber(Long blockNumber) { return 0L; }
+            @Override public void rollbackTo(Long slot) {}
+            @Override public ChainTip getHeaderTip() { return null; }
+        };
         volatile ChainTip tip;
 
         SameSlotEbbChain(Function<SameSlotEbbChain, ChainTip> initialTip) {
             tip = initialTip.apply(this);
-            when(state.getTip()).thenAnswer(invocation -> tip);
-            when(state.hasPoint(any())).thenReturn(true);
-            when(state.findNextBlock(previous)).thenReturn(ebb);
-            when(state.findNextBlock(ebb)).thenReturn(main);
-            when(state.getBlockHeader(any())).thenAnswer(invocation -> {
-                String hash = HexUtil.encodeHexString(invocation.<byte[]>getArgument(0));
-                byte blockNumber = (byte) (hash.equals(ebb.getHash()) ? 1 : 2);
-                return new byte[]{(byte) 0x82, 0x07, 0x43, blockNumber, 0, 0};
-            });
         }
 
         ChainTip ebbTip() {
