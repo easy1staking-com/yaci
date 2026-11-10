@@ -335,7 +335,7 @@ class TxSubmissionServerAgentTest {
     }
 
     @Test
-    void testMsgDoneFromTxIdsBlockingLeavesTxIdsBlocking() {
+    void testMsgDoneFromTxIdsBlocking_returnsToInitWithNoOutstandingIds() {
         // Move to Idle, then have the server send a blocking RequestTxIds so we land in TxIdsBlocking
         agent.receiveResponse(new Init());
         assertEquals(TxSubmissionState.Idle, agent.getCurrentState());

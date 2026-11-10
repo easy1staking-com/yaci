@@ -302,6 +302,29 @@ class ChainSyncServerAgentConcurrencyTest {
     }
 
     /**
+     * The chain rolls back below the last sent block while the client has agency (Idle, no request outstanding).
+     * The server may not send then; the client's next request gets the Rollbackward.
+     */
+    @Test
+    void rollbackWhileTheClientHasAgency_waitsForTheNextRequest() {
+        populateChain(100, 115);
+        deliverInbound(new FindIntersect(new Point[]{chainState.pointAt(110)}));
+        for (int i = 110; i <= 115; i++)
+            deliverInbound(new RequestNext());
+        assertThat(agent.getLastSentPoint()).isEqualTo(chainState.pointAt(115));
+        assertThat(agent.getCurrentState()).isEqualTo(ChainSyncState.Idle);
+        channel.written.clear();
+
+        chainState.rollbackTo(112L);
+        agent.onNewDataAvailable();
+        assertThat(channel.written).isEmpty();
+
+        deliverInbound(new RequestNext());
+        assertThat(channel.writtenReplies()).containsExactly("RB 112");
+        assertThat(agent.getCurrentState()).isEqualTo(ChainSyncState.Idle);
+    }
+
+    /**
      * Issue #209: on a real network most slots are empty (about one block per 20 slots on preprod; 23 here). A one-block
      * rollback at the tip must still be answered with a Rollbackward to the previous block, after which the client
      * follows the new fork.
