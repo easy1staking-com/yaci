@@ -1585,7 +1585,7 @@ public class YaciNode implements NodeAPI {
             return;
         }
 
-        // Classify rollback type
+        // Classify rollback type against the tip from before the rollback; the server is told after it
         boolean isReal = isRealRollback(point);
 
         // Perform rollback
@@ -1651,7 +1651,9 @@ public class YaciNode implements NodeAPI {
     }
 
     /**
-     * Determines if a rollback is a real chain reorganization or just a reconnection rollback
+     * Determines if a rollback is a real chain reorganization or just a reconnection rollback.
+     * Must run before {@code chainState.rollbackTo}: a rollback is real if it discards stored blocks, i.e. it goes
+     * below the body tip, or names a different block in the body tip's slot (Yano 9c9a3008, d65cddcb).
      */
     private boolean isRealRollback(Point rollbackPoint) {
         // Skip notification for initial/reconnection rollbacks
@@ -1660,14 +1662,16 @@ public class YaciNode implements NodeAPI {
             return false;
         }
 
-        // Check if chain tip has genuinely moved backwards
-        ChainTip currentTip = chainState.getTip();
-
-        if (lastKnownChainTip != null &&
-                rollbackPoint.getSlot() < lastKnownChainTip.getSlot() &&
-                currentTip.getSlot() <= rollbackPoint.getSlot()) {
+        ChainTip bodyTipBeforeRollback = chainState.getTip();
+        boolean earlierSlot = bodyTipBeforeRollback != null
+                && rollbackPoint.getSlot() < bodyTipBeforeRollback.getSlot();
+        boolean differentSameSlotPoint = bodyTipBeforeRollback != null
+                && rollbackPoint.getSlot() == bodyTipBeforeRollback.getSlot()
+                && (rollbackPoint.getHash() == null || !rollbackPoint.getHash().equalsIgnoreCase(
+                        HexUtil.encodeHexString(bodyTipBeforeRollback.getBlockHash())));
+        if (earlierSlot || differentSameSlotPoint) {
             log.info("Real chain reorganization detected - rollback from slot {} to slot {}",
-                    lastKnownChainTip.getSlot(), rollbackPoint.getSlot());
+                    bodyTipBeforeRollback.getSlot(), rollbackPoint.getSlot());
             return true;
         }
 
