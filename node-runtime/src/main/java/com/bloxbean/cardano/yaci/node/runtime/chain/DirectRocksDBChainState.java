@@ -959,6 +959,11 @@ public class DirectRocksDBChainState implements ChainState, AutoCloseable, Rocks
     @Override
     public boolean hasPoint(Point point) {
         try {
+            // Point.ORIGIN (slot=0, hash=null) is always valid if chain has blocks (Yano 0304d718)
+            if (point.getSlot() == 0 && point.getHash() == null) {
+                return getTip() != null;
+            }
+
             long slot = point.getSlot();
             String hash = point.getHash();
             byte[] mainHash = db.get(slotToHashHandle, longToBytes(slot));
