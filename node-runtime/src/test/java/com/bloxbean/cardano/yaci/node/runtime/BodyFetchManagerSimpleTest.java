@@ -151,6 +151,8 @@ class BodyFetchManagerSimpleTest {
             "00".getBytes()
         );
         Block block = createTestBlock(1001L, 501L, "b10c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        // Pipelined mode stores the header before its body arrives
+        chainState.storeBlockHeader(hexToBytes(block.getHeader().getHeaderBody().getBlockHash()), 501L, 1001L, "header".getBytes());
         List<Transaction> transactions = Collections.emptyList();
         
         // Initially no bodies received
@@ -206,6 +208,8 @@ class BodyFetchManagerSimpleTest {
             "00".getBytes()
         );
         Block block = createTestBlock(1001L, 501L, "ae111c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        // Pipelined mode stores the header before its body arrives
+        chainState.storeBlockHeader(hexToBytes(block.getHeader().getHeaderBody().getBlockHash()), 501L, 1001L, "header".getBytes());
         bodyFetchManager.onBlock(Era.Shelley, block, Collections.emptyList());
         bodyFetchManager.batchDone();
         
@@ -278,6 +282,8 @@ class BodyFetchManagerSimpleTest {
         );
         // Test with blocks that have missing CBOR - should throw exceptions
         Block blockWithoutCbor = createTestBlockWithoutCbor(1001L, 501L, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        // Pipelined mode stores the header before its body arrives
+        chainState.storeBlockHeader(hexToBytes(blockWithoutCbor.getHeader().getHeaderBody().getBlockHash()), 501L, 1001L, "header".getBytes());
         assertThrows(RuntimeException.class, () -> 
             bodyFetchManager.onBlock(Era.Shelley, blockWithoutCbor, Collections.emptyList()));
     }

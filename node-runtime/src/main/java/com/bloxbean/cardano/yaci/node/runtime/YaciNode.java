@@ -124,8 +124,10 @@ public class YaciNode implements NodeAPI {
     private HeaderSyncManager headerSyncManager;
     private BodyFetchManager bodyFetchManager;
 
-    // Remote tip info for sync strategy
+    // Remote tip info for sync strategy (found once, at startup)
     private Tip remoteTip;
+    // Latest network tip seen via ChainSync, shared with the pipeline managers
+    private final SyncTipContext syncTipContext = new SyncTipContext();
 
     // Server components (for serving other clients)
     private NodeServer nodeServer;
@@ -1347,8 +1349,7 @@ public class YaciNode implements NodeAPI {
      * Initialize HeaderSyncManager and BodyFetchManager for pipeline mode.
      */
     private void initializePipelineManagers() {
-        // Shared context to propagate latest network tip from headers to bodies
-        SyncTipContext syncTipContext = new SyncTipContext();
+        // Shared context (syncTipContext) propagates the latest network tip from headers to bodies and to YaciNode
         if (headerSyncManager != null) {
             // Reset existing managers
             headerSyncManager.resetMetrics();
@@ -1696,6 +1697,51 @@ public class YaciNode implements NodeAPI {
                 }
             }
         }
+
+        maybeTransitionToSteadyStateNearTip();
+    }
+
+    /**
+     * Leave INITIAL_SYNC once the stored body tip is within 1000 slots of the network tip. Called after each body
+     * (PipelineDataListener -> {@link #updateSyncProgress()}), so a node that resumed far behind leaves bulk mode
+     * when it catches up instead of staying in it at the tip.
+     */
+    void maybeTransitionToSteadyStateNearTip() {
+        if (!isPipelinedMode || syncPhase != SyncPhase.INITIAL_SYNC) return;
+
+        long distance = distanceToNetworkTip();
+        long nearTipThreshold = 1000; // slots
+        if (distance > nearTipThreshold) return;
+
+        var prev = syncPhase;
+        syncPhase = SyncPhase.STEADY_STATE;
+        if (bodyFetchManager != null) {
+            bodyFetchManager.setSyncPhase(SyncPhase.STEADY_STATE);
+            if (bodyFetchManager.isPaused()) bodyFetchManager.resume();
+        }
+        log.info("🏁 CAUGHT UP: stored tip is {} slots from the network tip (<= {}) - transitioned to STEADY_STATE",
+                distance, nearTipThreshold);
+        EventMetadata meta = EventMetadata.builder().origin("node-runtime").build();
+        eventBus.publish(new SyncStatusChangedEvent(prev, syncPhase), meta, PublishOptions.builder().build());
+    }
+
+    /**
+     * Distance in slots from the stored body tip to the network tip: the latest tip seen via ChainSync once a header
+     * has arrived, else the tip found at startup. Long.MAX_VALUE when either tip is unknown.
+     */
+    private long distanceToNetworkTip() {
+        try {
+            long networkTipSlot = syncTipContext.getNetworkTipSlot();
+            if (networkTipSlot < 0) {
+                if (remoteTip == null || remoteTip.getPoint() == null) return Long.MAX_VALUE;
+                networkTipSlot = remoteTip.getPoint().getSlot();
+            }
+            ChainTip storedTip = chainState.getTip();
+            if (storedTip == null) return Long.MAX_VALUE;
+            return Math.max(0, networkTipSlot - storedTip.getSlot());
+        } catch (Exception e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     /**
@@ -1725,13 +1771,8 @@ public class YaciNode implements NodeAPI {
         if (isPipelinedMode && syncPhase == SyncPhase.INTERSECT_PHASE &&
             bodyFetchManager != null && bodyFetchManager.isPaused()) {
 
-            // Choose next phase based on distance to remote tip
-            long distance = Long.MAX_VALUE;
-            try {
-                if (remoteTip != null && remoteTip.getPoint() != null) {
-                    distance = Math.max(0, remoteTip.getPoint().getSlot() - lastProcessedSlot);
-                }
-            } catch (Exception ignored) {}
+            // Choose next phase based on distance from the stored tip to the network tip
+            long distance = distanceToNetworkTip();
 
             long nearTipThreshold = 1000; // slots
             SyncPhase nextPhase = (distance <= nearTipThreshold) ? SyncPhase.STEADY_STATE : SyncPhase.INITIAL_SYNC;
@@ -2004,13 +2045,8 @@ public class YaciNode implements NodeAPI {
         // After timeout, exit INTERSECT_PHASE. Choose next phase based on distance to remote tip.
         scheduler.schedule(() -> {
             if (syncPhase == SyncPhase.INTERSECT_PHASE) {
-                // Determine distance to remote tip; default to INITIAL_SYNC if unknown/far
-                long distance = Long.MAX_VALUE;
-                try {
-                    if (remoteTip != null && remoteTip.getPoint() != null) {
-                        distance = Math.max(0, remoteTip.getPoint().getSlot() - lastProcessedSlot);
-                    }
-                } catch (Exception ignored) {}
+                // Distance from the stored tip to the network tip; default to INITIAL_SYNC if unknown/far
+                long distance = distanceToNetworkTip();
 
                 long nearTipThreshold = 1000; // slots
                 SyncPhase nextPhase = (distance <= nearTipThreshold) ? SyncPhase.STEADY_STATE : SyncPhase.INITIAL_SYNC;

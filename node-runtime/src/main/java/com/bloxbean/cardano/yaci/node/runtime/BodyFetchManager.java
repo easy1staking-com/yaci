@@ -451,6 +451,11 @@ public class BodyFetchManager implements BlockChainDataListener, Runnable {
             long blockNumber = block.getHeader().getHeaderBody().getBlockNumber();
             String hash = block.getHeader().getHeaderBody().getBlockHash();
 
+            // A body whose header is not stored was rolled back while in flight: refuse it (not a stale block)
+            if (isOrphanBody(blockNumber, slot, hash)) {
+                return;
+            }
+
             // Check for stale blocks that arrived after rollback
             if (isStaleBlock(blockNumber, slot, hash, false)) {
                 log.warn("🗑️ DISCARDED STALE BLOCK: Block #{} at slot {} arrived after rollback - skipping storage",
@@ -567,6 +572,11 @@ public class BodyFetchManager implements BlockChainDataListener, Runnable {
             long slot = byronBlock.getHeader().getConsensusData().getAbsoluteSlot();
             long blockNumber = byronBlock.getHeader().getConsensusData().getDifficulty().longValue();
             String hash = byronBlock.getHeader().getBlockHash();
+
+            // A body whose header is not stored was rolled back while in flight: refuse it (not a stale block)
+            if (isOrphanBody(blockNumber, slot, hash)) {
+                return;
+            }
 
             // Check for stale blocks that arrived after rollback
             if (isStaleBlock(blockNumber, slot, hash, false)) {
@@ -1033,6 +1043,30 @@ public class BodyFetchManager implements BlockChainDataListener, Runnable {
             log.warn("Error checking if block #{} is stale - marking as stale for safety: {}", blockNumber, e.getMessage());
             return true; // If we can't determine safely, discard the block
         }
+    }
+
+    /**
+     * Check if an incoming body has no stored header.
+     *
+     * In pipelined mode ChainSync stores every header before BlockFetch delivers its body. A body whose header is
+     * absent was rolled back while its range was in flight; the rollback also removed the slot index that the
+     * store's FORK MISMATCH check compares against, so storing it would make an orphan the body tip (YRB-4).
+     * This is expected after a rollback, not evidence of corruption, so it does not count as a stale block.
+     *
+     * @return true if the body should be discarded
+     */
+    private boolean isOrphanBody(long blockNumber, long slot, String hash) {
+        byte[] hashBytes;
+        try {
+            hashBytes = HexUtil.decodeHexString(hash);
+        } catch (Exception e) {
+            return false; // Malformed hash: left to the storage path, which rejects it
+        }
+        if (chainState.getBlockHeader(hashBytes) != null) {
+            return false;
+        }
+        log.warn("ORPHAN BODY: block #{} at slot {} hash {} has no stored header - skipping", blockNumber, slot, hash);
+        return true;
     }
 
     /**

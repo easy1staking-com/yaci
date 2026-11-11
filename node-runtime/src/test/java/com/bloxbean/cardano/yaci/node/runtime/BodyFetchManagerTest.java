@@ -200,6 +200,8 @@ class BodyFetchManagerTest {
                 "00".getBytes()
         );
         Block block = createTestBlock(1001L, 501L, "b10c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        // Pipelined mode stores the header before its body arrives
+        chainState.storeBlockHeader(hexToBytes(block.getHeader().getHeaderBody().getBlockHash()), 501L, 1001L, "header".getBytes());
         List<Transaction> transactions = Collections.emptyList();
         
         // Initially no bodies received
@@ -288,6 +290,8 @@ class BodyFetchManagerTest {
                 "00".getBytes()
         );
         Block block = createTestBlock(1001L, 501L, "ae111c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        // Pipelined mode stores the header before its body arrives
+        chainState.storeBlockHeader(hexToBytes(block.getHeader().getHeaderBody().getBlockHash()), 501L, 1001L, "header".getBytes());
         bodyFetchManager.onBlock(Era.Shelley, block, Collections.emptyList());
         bodyFetchManager.batchDone();
         
